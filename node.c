@@ -45,7 +45,7 @@ node_t new_node()
   return n;
 }
 
-unsigned int udp_socket(node_t n)
+void udp_socket(node_t *n)
 {
   unsigned int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_sock < 0)
@@ -57,7 +57,7 @@ unsigned int udp_socket(node_t n)
   sockaddr_in srv;
   srv.sin_family = AF_INET;
   srv.sin_addr.s_addr = INADDR_ANY;
-  srv.sin_port = htons(n.udp_port);
+  srv.sin_port = htons(n->udp_port);
 
   printf("UDP port assigned is %d\n", ntohs(srv.sin_port));
 
@@ -67,15 +67,33 @@ unsigned int udp_socket(node_t n)
     exit(EXIT_FAILURE);
   }
 
-  return udp_sock;
+  n->udp_socket_fd = udp_sock;
 }
 
-void processMessage(node_t n, unsigned int sock_fd)
+void forwarding_udp_socket(node_t *n)
+{
+  int fus = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fus < 0)
+  {
+    printf("error initiating master socket");
+    exit(EXIT_FAILURE);
+  }
+
+  sockaddr_in remote;
+  remote.sin_addr.s_addr = n->ip_addr;
+  remote.sin_family = AF_INET;
+  remote.sin_port = htons(n->next_hop_udp_port);
+
+  n->next_hop_udp_socket_fd = fus;
+  n->next_hop_addr = remote;
+}
+
+void processMessage(node_t n)
 {
   message_t msg;
   sockaddr_in cli;
   unsigned int client_address_size = sizeof(cli);
-  if (recvfrom(sock_fd, &msg, sizeof(message_t), 0, (struct sockaddr *)&cli, &client_address_size) < 0)
+  if (recvfrom(n.udp_socket_fd, &msg, sizeof(message_t), 0, (struct sockaddr *)&cli, &client_address_size) < 0)
   {
     printf("recvfrom()");
     exit(4);
@@ -101,27 +119,12 @@ void processMessage(node_t n, unsigned int sock_fd)
   else
   {
     printf("FORWARD IT\n");
-    int msfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (msfd < 0)
-    {
-      printf("error initiating master socket");
-      exit(EXIT_FAILURE);
-    }
 
-    printf("%d - %d\n", n.ip_addr, n.next_hop_ip);
-
-    sockaddr_in remote;
-    remote.sin_addr.s_addr = n.ip_addr;
-    remote.sin_family = AF_INET;
-    remote.sin_port = htons(n.next_hop_udp_port);
-
-    if (sendto(msfd, &msg, sizeof(message_t), 0, (struct sockaddr *)&remote, sizeof(remote)) < 0)
+    if (sendto(n.next_hop_udp_socket_fd, &msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
     {
       printf("sendto()");
       exit(2);
     }
-
-    close(msfd);
   }
 }
 
@@ -147,29 +150,14 @@ void processInput(node_t n, char *buf)
     else
     {
       printf("CREATE MESSAGE AND FORWARD IT\n");
-      int msfd = socket(AF_INET, SOCK_DGRAM, 0);
-      if (msfd < 0)
-      {
-        printf("error initiating master socket");
-        exit(EXIT_FAILURE);
-      }
-
-      printf("%d - %d\n", n.ip_addr, n.next_hop_ip);
-
-      sockaddr_in remote;
-      remote.sin_addr.s_addr = n.ip_addr;
-      remote.sin_family = AF_INET;
-      remote.sin_port = htons(n.next_hop_udp_port);
 
       message_t *msg = newMessage(MESSAGE_TYPE_GET_FORWARD, key, 0, n.ip_addr, n.tcp_port);
 
-      if (sendto(msfd, msg, sizeof(message_t), 0, (struct sockaddr *)&remote, sizeof(remote)) < 0)
+      if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
       {
         printf("sendto()");
         exit(2);
       }
-
-      close(msfd);
     }
   }
   else if (strncmp(method, "SET", 3) == 0)
@@ -193,29 +181,13 @@ void processInput(node_t n, char *buf)
     else
     {
       printf("CREATE MESSAGE AND FORWARD IT\n");
-      int msfd = socket(AF_INET, SOCK_DGRAM, 0);
-      if (msfd < 0)
-      {
-        printf("error initiating master socket");
-        exit(EXIT_FAILURE);
-      }
-
-      printf("%d - %d\n", n.ip_addr, n.next_hop_ip);
-
-      sockaddr_in remote;
-      remote.sin_addr.s_addr = n.ip_addr;
-      remote.sin_family = AF_INET;
-      remote.sin_port = htons(n.next_hop_udp_port);
 
       message_t *msg = newMessage(MESSAGE_TYPE_PUT_FORWARD, key, value, n.ip_addr, n.tcp_port);
-
-      if (sendto(msfd, msg, sizeof(message_t), 0, (struct sockaddr *)&remote, sizeof(remote)) < 0)
+      if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
       {
         printf("sendto()");
         exit(2);
       }
-
-      close(msfd);
     }
   }
   else
@@ -227,7 +199,8 @@ void processInput(node_t n, char *buf)
 int main(int argc, char const *argv[])
 {
   node_t n = new_node();
-  unsigned int udp_sock = udp_socket(n);
+  udp_socket(&n);
+  forwarding_udp_socket(&n);
 
   fd_set fdr;
   while (1)
@@ -235,9 +208,9 @@ int main(int argc, char const *argv[])
     printf("Waiting for user input in the form of GET key (int) / SET key (int) value (int)\n");
     FD_ZERO(&fdr);
     FD_SET(0, &fdr); // add STDIN to the fd set
-    FD_SET(udp_sock, &fdr);
+    FD_SET(n.udp_socket_fd, &fdr);
 
-    select(udp_sock + 1, &fdr, NULL, NULL, NULL);
+    select(n.udp_socket_fd + 1, &fdr, NULL, NULL, NULL);
 
     if (FD_ISSET(0, &fdr))
     {
@@ -246,9 +219,9 @@ int main(int argc, char const *argv[])
       processInput(n, buf);
     }
 
-    if (FD_ISSET(udp_sock, &fdr))
+    if (FD_ISSET(n.udp_socket_fd, &fdr))
     {
-      processMessage(n, udp_sock);
+      processMessage(n);
     }
   }
 

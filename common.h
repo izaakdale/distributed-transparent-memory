@@ -11,6 +11,12 @@ typedef struct node
   unsigned int tcp_port;
   unsigned int next_hop_ip;
   unsigned int next_hop_udp_port;
+
+  unsigned int udp_socket_fd;
+  unsigned int tcp_socket_fd;
+
+  sockaddr_in next_hop_addr;
+  unsigned int next_hop_udp_socket_fd;
 } node_t;
 
 typedef enum
