@@ -191,6 +191,32 @@ void processMessage(node_t n)
       }
 
       // open tcp connection and send
+      int comm_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (comm_socket < 0)
+      {
+        printf("failed to create socket\n");
+        exit(1);
+      }
+      sockaddr_in dest;
+      dest.sin_addr.s_addr = msg.address;
+      dest.sin_family = AF_INET;
+      dest.sin_port = htons(msg.tcp_port);
+      uint addrln = sizeof(struct sockaddr);
+
+      if ((connect(comm_socket, (struct sockaddr *)&dest, addrln)) < 0)
+      {
+        printf("failed to connect to server\n");
+        exit(1);
+      }
+
+      message_t *reply = newMessage(MESSAGE_TYPE_GET_REPLY_X, fetched.key, fetched.value, 0, 0);
+      int bytes = send(comm_socket, reply, sizeof(message_t), 0);
+      if (bytes < 0)
+      {
+        printf("failed to connect to server\n");
+        exit(1);
+      }
+
       printf("%d - %d fetched from store\n", fetched.key, fetched.value);
       break;
     case MESSAGE_TYPE_PUT_FORWARD:
@@ -228,13 +254,13 @@ void processInput(node_t n, char *buf)
     }
     if ((key % 3) + 1 == n.id)
     {
-      printf("GET VALUE AND PRINT IT\n");
+      printf("VALUE IN MY STORE\n");
       record_t rec = fetch(key);
       printf("Key: %d - Value: %d\n", rec.key, rec.value);
     }
     else
     {
-      printf("CREATE MESSAGE AND FORWARD IT\n");
+      printf("VALUE IN A REMOTE STORE, FORWARD UDP MESSAGE\n");
       message_t *msg = newMessage(MESSAGE_TYPE_GET_FORWARD, key, 0, n.ip_addr, n.tcp_port);
 
       if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
@@ -242,6 +268,33 @@ void processInput(node_t n, char *buf)
         printf("sendto()");
         exit(2);
       }
+      // message has been forwarded on the UDP chain, wait for the destination server to initiate tcp comms.
+
+      sockaddr_in srv;
+      srv.sin_family = AF_INET;
+      srv.sin_addr.s_addr = INADDR_ANY;
+      srv.sin_port = htons(n.tcp_port);
+
+      uint addrln = sizeof(struct sockaddr);
+
+      printf("Waiting for TCP client to connect\n");
+      int comm_socket = accept(n.tcp_socket_fd, (struct sockaddr *)&srv, &addrln);
+      if (comm_socket < 0)
+      {
+        printf("accept()");
+        exit(2);
+      }
+
+      message_t incoming_msg;
+      int bytes = recv(comm_socket, (char *)&incoming_msg, sizeof(message_t), 0);
+      if (bytes < 0)
+      {
+        printf("recv()");
+        exit(2);
+      }
+
+      printf("TYPE: %d - Key: %d - Value: %d\n", incoming_msg.type, incoming_msg.key, incoming_msg.value);
+      close(comm_socket);
     }
   }
   else if (strncmp(method, "SET", 3) == 0)
@@ -260,12 +313,12 @@ void processInput(node_t n, char *buf)
 
     if ((key % 3) + 1 == n.id)
     {
-      printf("SET VALUE IN MEMORY\n");
+      printf("VALUE BELONGS IN MY STORE\n");
       insert(key, value);
     }
     else
     {
-      printf("CREATE MESSAGE AND FORWARD IT\n");
+      printf("VALUE BELONGS IN REMOTE STORE, FORWARD UDP MESSAGE\n");
       message_t *msg = newMessage(MESSAGE_TYPE_PUT_FORWARD, key, value, n.ip_addr, n.tcp_port);
       if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
       {
