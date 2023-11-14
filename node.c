@@ -12,7 +12,51 @@
 
 #include "common.h"
 
-unsigned int n_of_nodes = 3;
+typedef struct record
+{
+  int key;
+  int value;
+} record_t;
+
+record_t store[1024];
+
+void init_store()
+{
+  for (int i = 0; i < 1024; i++)
+  {
+    store[i].key = -1;
+    store[i].value = -1;
+  }
+}
+
+record_t fetch(int key)
+{
+  for (int i = 0; i < 1024; i++)
+  {
+    if (store[i].key == key)
+    {
+      return store[i];
+    }
+  }
+  record_t undef_rec;
+  undef_rec.key = -1;
+  undef_rec.value = -1;
+  return undef_rec;
+}
+
+void insert(int key, int value)
+{
+  for (int i = 0; i < 1024; i++)
+  {
+    if (store[i].key == -1)
+    {
+      record_t new_rec;
+      new_rec.key = key;
+      new_rec.value = value;
+      store[i] = new_rec;
+    }
+  }
+}
 
 node_t new_node()
 {
@@ -41,7 +85,7 @@ node_t new_node()
   char buf[15];
   inet_ntop(AF_INET, &n.ip_addr, buf, 15);
   printf("Server %u - %s:%u(tcp)/%u(udp)\n", n.id, buf, n.tcp_port, n.udp_port);
-  printf("Next hop udp port: %d\n", n.next_hop_udp_port);
+  printf("Next hop UDP port: %d\n", n.next_hop_udp_port);
   return n;
 }
 
@@ -50,7 +94,7 @@ void udp_socket(node_t *n)
   unsigned int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_sock < 0)
   {
-    printf("error initiating master socket");
+    printf("error initiating master udp socket");
     exit(EXIT_FAILURE);
   }
 
@@ -68,6 +112,37 @@ void udp_socket(node_t *n)
   }
 
   n->udp_socket_fd = udp_sock;
+}
+
+void tcp_socket(node_t *n)
+{
+  unsigned int tcp_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (tcp_sock < 0)
+  {
+    printf("error initiating master tcp socket");
+    exit(EXIT_FAILURE);
+  }
+
+  sockaddr_in srv;
+  srv.sin_family = AF_INET;
+  srv.sin_addr.s_addr = INADDR_ANY;
+  srv.sin_port = htons(n->tcp_port);
+
+  printf("TCP port assigned is %d\n", ntohs(srv.sin_port));
+
+  if ((bind(tcp_sock, (const sockaddr *)&srv, sizeof(srv))) < 0)
+  {
+    printf("bind failure\n");
+    exit(EXIT_FAILURE);
+  }
+
+  if (listen(tcp_sock, 1) < 0)
+  {
+    printf("bind failure\n");
+    exit(EXIT_FAILURE);
+  }
+
+  n->tcp_socket_fd = tcp_sock;
 }
 
 void forwarding_udp_socket(node_t *n)
@@ -108,9 +183,19 @@ void processMessage(node_t n)
     {
     case MESSAGE_TYPE_GET_FORWARD:
       printf("GET VALUE\n");
+      record_t fetched = fetch(msg.key);
+      if (fetched.key == -1)
+      {
+        // handle error
+        printf("error fetching...\n");
+      }
+
+      // open tcp connection and send
+      printf("%d - %d fetched from store\n", fetched.key, fetched.value);
       break;
     case MESSAGE_TYPE_PUT_FORWARD:
       printf("SET VALUE\n");
+      insert(msg.key, msg.value);
       break;
     default:
       break;
@@ -135,8 +220,6 @@ void processInput(node_t n, char *buf)
   if (strncmp(method, "GET", 3) == 0)
   {
     char *keystr = strtok(NULL, "\n");
-    printf("hitting get %s\n", keystr);
-
     int key = atoi(keystr);
     if (key == 0)
     {
@@ -146,11 +229,12 @@ void processInput(node_t n, char *buf)
     if ((key % 3) + 1 == n.id)
     {
       printf("GET VALUE AND PRINT IT\n");
+      record_t rec = fetch(key);
+      printf("Key: %d - Value: %d\n", rec.key, rec.value);
     }
     else
     {
       printf("CREATE MESSAGE AND FORWARD IT\n");
-
       message_t *msg = newMessage(MESSAGE_TYPE_GET_FORWARD, key, 0, n.ip_addr, n.tcp_port);
 
       if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
@@ -177,11 +261,11 @@ void processInput(node_t n, char *buf)
     if ((key % 3) + 1 == n.id)
     {
       printf("SET VALUE IN MEMORY\n");
+      insert(key, value);
     }
     else
     {
       printf("CREATE MESSAGE AND FORWARD IT\n");
-
       message_t *msg = newMessage(MESSAGE_TYPE_PUT_FORWARD, key, value, n.ip_addr, n.tcp_port);
       if (sendto(n.next_hop_udp_socket_fd, msg, sizeof(message_t), 0, (struct sockaddr *)&n.next_hop_addr, sizeof(n.next_hop_addr)) < 0)
       {
@@ -198,8 +282,11 @@ void processInput(node_t n, char *buf)
 
 int main(int argc, char const *argv[])
 {
+  init_store();
+
   node_t n = new_node();
   udp_socket(&n);
+  tcp_socket(&n);
   forwarding_udp_socket(&n);
 
   fd_set fdr;
